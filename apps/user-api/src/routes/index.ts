@@ -6,6 +6,7 @@ import ordersRouter from './orders';
 import authRouter from './auth';
 import reviewsRouter from './reviews';
 import searchRouter from './search';
+import blogRouter from './blog';
 
 const router = Router();
 
@@ -19,5 +20,6 @@ router.use('/orders', ordersRouter);
 router.use('/auth', authRouter);
 router.use('/reviews', reviewsRouter);
 router.use('/search', searchRouter);
+router.use('/blog', blogRouter);
 
 export default router;

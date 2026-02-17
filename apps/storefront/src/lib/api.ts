@@ -110,4 +110,16 @@ export const reviewsApi = {
     fetchApi('/api/reviews', { method: 'POST', body: JSON.stringify(data), token }),
 };
 
+// Blog
+export const blogApi = {
+  list: (params?: Record<string, string>) => {
+    const query = params ? `?${new URLSearchParams(params)}` : '';
+    return fetchApi<{ posts: unknown[]; total: number; page: number; totalPages: number }>(
+      `/api/blog${query}`
+    );
+  },
+  getBySlug: (slug: string) => fetchApi(`/api/blog/${slug}`),
+  getCategories: () => fetchApi('/api/blog/categories'),
+};
+
 export { ApiError };
