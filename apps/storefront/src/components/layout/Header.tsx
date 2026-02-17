@@ -10,6 +10,7 @@ import {
   X,
   Gamepad2,
 } from 'lucide-react';
+import { useCart } from '@/lib/cart-store';
 
 const navigation = [
   { name: 'Accueil', href: '/' },
@@ -23,8 +24,7 @@ export default function Header() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-
-  const cartItemCount = 0; // In production, this would come from a cart store
+  const { itemCount: cartItemCount } = useCart();
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();

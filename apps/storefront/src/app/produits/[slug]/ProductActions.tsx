@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { ShoppingCart, Heart, Minus, Plus, Check } from 'lucide-react';
+import { useCart } from '@/lib/cart-store';
 
 interface Variant {
   name: string;
@@ -12,6 +13,8 @@ interface Variant {
 interface ProductActionsProps {
   productId: string;
   productName: string;
+  productSlug: string;
+  productImage: string;
   price: number;
   variants: Variant[];
   inStock: boolean;
@@ -20,10 +23,13 @@ interface ProductActionsProps {
 export default function ProductActions({
   productId,
   productName,
+  productSlug,
+  productImage,
   price,
   variants,
   inStock,
 }: ProductActionsProps) {
+  const { addItem } = useCart();
   const [selectedVariant, setSelectedVariant] = useState<string>(
     variants.find((v) => v.inStock)?.value ?? ''
   );
@@ -52,14 +58,15 @@ export default function ProductActions({
   const handleAddToCart = () => {
     if (!canAddToCart) return;
 
-    // In production, this would dispatch to a cart store or API
-    console.log('Added to cart:', {
+    addItem({
       productId,
-      productName,
-      variant: selectedVariant,
-      quantity,
+      name: productName,
+      slug: productSlug,
       price,
-    });
+      image: productImage,
+      variant: selectedVariant || undefined,
+      variantName: currentVariant?.name,
+    }, quantity);
 
     setAddedToCart(true);
     setTimeout(() => setAddedToCart(false), 2000);
@@ -67,12 +74,6 @@ export default function ProductActions({
 
   const handleToggleFavorite = () => {
     setIsFavorite((prev) => !prev);
-
-    // In production, this would call a favorites API
-    console.log(
-      isFavorite ? 'Removed from favorites:' : 'Added to favorites:',
-      { productId, productName }
-    );
   };
 
   return (

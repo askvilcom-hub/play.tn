@@ -7,6 +7,7 @@ import customersRouter from './customers';
 import couponsRouter from './coupons';
 import settingsRouter from './settings';
 import auditLogsRouter from './audit-logs';
+import blogRouter from './blog';
 
 /**
  * Aggregateur de routes admin.
@@ -23,5 +24,6 @@ router.use('/customers', customersRouter);
 router.use('/coupons', couponsRouter);
 router.use('/settings', settingsRouter);
 router.use('/audit-logs', auditLogsRouter);
+router.use('/blog', blogRouter);
 
 export default router;

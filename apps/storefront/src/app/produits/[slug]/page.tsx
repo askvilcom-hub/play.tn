@@ -366,6 +366,8 @@ export default async function ProductPage({ params }: ProductPageProps) {
             <ProductActions
               productId={product.id}
               productName={product.name}
+              productSlug={product.slug}
+              productImage={product.images[0]}
               price={product.price}
               variants={product.variants}
               inStock={product.inStock}
