@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Votre commande est en route - Play.tn</title>
+  <style>
+    body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Arial, sans-serif; background-color: #f4f4f7; color: #333; }
+    .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; }
+    .header { background: linear-gradient(135deg, #2563eb, #7c3aed); padding: 30px; text-align: center; }
+    .header h1 { color: #ffffff; margin: 0; font-size: 28px; }
+    .content { padding: 30px; }
+    .badge { display: inline-block; background-color: #f97316; color: white; padding: 6px 16px; border-radius: 20px; font-size: 14px; font-weight: 600; }
+    .tracking-box { background: linear-gradient(135deg, #eff6ff, #f0fdf4); border: 2px solid #2563eb; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0; }
+    .tracking-number { font-size: 24px; font-weight: 700; color: #2563eb; letter-spacing: 2px; }
+    .timeline { margin: 24px 0; }
+    .timeline-item { display: flex; align-items: flex-start; margin-bottom: 16px; }
+    .timeline-dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 12px; margin-top: 4px; flex-shrink: 0; }
+    .timeline-dot.done { background-color: #10b981; }
+    .timeline-dot.active { background-color: #f97316; }
+    .timeline-dot.pending { background-color: #d1d5db; }
+    .timeline-text { font-size: 14px; color: #1e293b; }
+    .timeline-date { font-size: 12px; color: #94a3b8; }
+    .cta-button { display: inline-block; background-color: #2563eb; color: #ffffff; padding: 14px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; }
+    .footer { background-color: #f8fafc; padding: 24px 30px; text-align: center; font-size: 12px; color: #94a3b8; }
+    .footer a { color: #2563eb; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Play.tn</h1>
+    </div>
+    <div class="content">
+      <span class="badge">📦 En cours de livraison</span>
+      <h2 style="font-size: 22px; margin-top: 16px;">Bonne nouvelle, {{customerName}} !</h2>
+      <p style="color: #64748b;">Votre commande <strong>{{orderNumber}}</strong> est en route vers vous.</p>
+
+      <div class="tracking-box">
+        <p style="margin: 0 0 8px; color: #64748b; font-size: 14px;">Numéro de suivi</p>
+        <div class="tracking-number">{{trackingNumber}}</div>
+      </div>
+
+      <div class="timeline">
+        <div class="timeline-item">
+          <div class="timeline-dot done"></div>
+          <div>
+            <div class="timeline-text">Commande confirmée</div>
+            <div class="timeline-date">{{confirmedDate}}</div>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-dot done"></div>
+          <div>
+            <div class="timeline-text">En préparation</div>
+            <div class="timeline-date">{{processingDate}}</div>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-dot active"></div>
+          <div>
+            <div class="timeline-text">Expédiée</div>
+            <div class="timeline-date">{{shippedDate}}</div>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-dot pending"></div>
+          <div>
+            <div class="timeline-text">Livraison estimée</div>
+            <div class="timeline-date">{{estimatedDelivery}}</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="text-align: center;">
+        <a href="{{trackingUrl}}" class="cta-button">Suivre mon colis</a>
+      </div>
+
+      <p style="color: #64748b; font-size: 14px; margin-top: 24px;">
+        Des questions ? Contactez-nous à
+        <a href="mailto:support@play.tn" style="color: #2563eb;">support@play.tn</a>
+      </p>
+    </div>
+    <div class="footer">
+      <p>© 2026 Play.tn - Tous droits réservés</p>
+      <p><a href="https://play.tn">Accueil</a> • <a href="https://play.tn/compte">Mon compte</a></p>
+    </div>
+  </div>
+</body>
+</html>

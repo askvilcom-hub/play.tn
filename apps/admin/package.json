@@ -1,0 +1,35 @@
+{
+  "name": "@play-tn/admin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "lint": "eslint src --ext ts,tsx"
+  },
+  "dependencies": {
+    "@popperjs/core": "^2.11.8",
+    "axios": "^1.7.2",
+    "bootstrap": "^5.3.3",
+    "chart.js": "^4.4.3",
+    "date-fns": "^3.6.0",
+    "firebase": "^10.12.2",
+    "react": "^18.3.1",
+    "react-bootstrap": "^2.10.2",
+    "react-chartjs-2": "^5.2.0",
+    "react-dom": "^18.3.1",
+    "react-hot-toast": "^2.4.1",
+    "react-icons": "^5.2.1",
+    "react-router-dom": "^6.23.1",
+    "swr": "^2.2.5"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.1"
+  }
+}

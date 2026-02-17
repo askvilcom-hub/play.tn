@@ -1,0 +1,31 @@
+{
+  "name": "play-tn",
+  "version": "1.0.0",
+  "private": true,
+  "description": "play.tn - E-commerce platform for gaming, toys, and play products in Tunisia",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:storefront": "npm run dev --workspace=apps/storefront",
+    "dev:admin": "npm run dev --workspace=apps/admin",
+    "dev:user-api": "npm run dev --workspace=apps/user-api",
+    "dev:admin-api": "npm run dev --workspace=apps/admin-api",
+    "build:storefront": "npm run build --workspace=apps/storefront",
+    "build:admin": "npm run build --workspace=apps/admin",
+    "build:user-api": "npm run build --workspace=apps/user-api",
+    "build:admin-api": "npm run build --workspace=apps/admin-api",
+    "build:all": "npm run build:storefront && npm run build:admin && npm run build:user-api && npm run build:admin-api",
+    "test": "npm run test --workspaces --if-present",
+    "test:storefront": "npm run test --workspace=apps/storefront",
+    "test:user-api": "npm run test --workspace=apps/user-api",
+    "test:admin-api": "npm run test --workspace=apps/admin-api",
+    "lint": "npm run lint --workspaces --if-present",
+    "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+}

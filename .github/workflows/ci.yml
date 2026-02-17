@@ -1,0 +1,200 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  GCP_PROJECT_ID: play-tn
+  GCP_REGION: europe-west1
+  REGISTRY: europe-west1-docker.pkg.dev/play-tn/play-tn
+
+jobs:
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+        env:
+          NODE_ENV: test
+
+  build-storefront:
+    name: Build Storefront
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev
+
+      - name: Build & Push
+        run: |
+          ENV_TAG=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          docker build -t ${{ env.REGISTRY }}/storefront:${ENV_TAG}-${{ github.sha }} \
+            -t ${{ env.REGISTRY }}/storefront:${ENV_TAG}-latest \
+            -f apps/storefront/Dockerfile .
+          docker push ${{ env.REGISTRY }}/storefront:${ENV_TAG}-${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/storefront:${ENV_TAG}-latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          ENV_TAG=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          SERVICE_NAME="storefront-${ENV_TAG}"
+          gcloud run deploy ${SERVICE_NAME} \
+            --image ${{ env.REGISTRY }}/storefront:${ENV_TAG}-${{ github.sha }} \
+            --region ${{ env.GCP_REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --min-instances 0 \
+            --max-instances 10 \
+            --memory 512Mi \
+            --cpu 1 \
+            --port 3000 \
+            --set-env-vars "NODE_ENV=${ENV_TAG == 'prod' && 'production' || 'development'}"
+
+  build-user-api:
+    name: Build User API
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev
+
+      - name: Build & Push
+        run: |
+          ENV_TAG=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          docker build -t ${{ env.REGISTRY }}/user-api:${ENV_TAG}-${{ github.sha }} \
+            -t ${{ env.REGISTRY }}/user-api:${ENV_TAG}-latest \
+            -f apps/user-api/Dockerfile .
+          docker push ${{ env.REGISTRY }}/user-api:${ENV_TAG}-${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/user-api:${ENV_TAG}-latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          ENV_TAG=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          SERVICE_NAME="user-api-${ENV_TAG}"
+          gcloud run deploy ${SERVICE_NAME} \
+            --image ${{ env.REGISTRY }}/user-api:${ENV_TAG}-${{ github.sha }} \
+            --region ${{ env.GCP_REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --min-instances 0 \
+            --max-instances 10 \
+            --memory 256Mi \
+            --cpu 1 \
+            --port 4001
+
+  build-admin-api:
+    name: Build Admin API
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev
+
+      - name: Build & Push
+        run: |
+          ENV_TAG=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          docker build -t ${{ env.REGISTRY }}/admin-api:${ENV_TAG}-${{ github.sha }} \
+            -t ${{ env.REGISTRY }}/admin-api:${ENV_TAG}-latest \
+            -f apps/admin-api/Dockerfile .
+          docker push ${{ env.REGISTRY }}/admin-api:${ENV_TAG}-${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/admin-api:${ENV_TAG}-latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          ENV_TAG=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          SERVICE_NAME="admin-api-${ENV_TAG}"
+          gcloud run deploy ${SERVICE_NAME} \
+            --image ${{ env.REGISTRY }}/admin-api:${ENV_TAG}-${{ github.sha }} \
+            --region ${{ env.GCP_REGION }} \
+            --platform managed \
+            --no-allow-unauthenticated \
+            --min-instances 0 \
+            --max-instances 5 \
+            --memory 256Mi \
+            --cpu 1 \
+            --port 4002
+
+  build-admin:
+    name: Build Admin Frontend
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev
+
+      - name: Build & Push
+        run: |
+          ENV_TAG=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          docker build -t ${{ env.REGISTRY }}/admin:${ENV_TAG}-${{ github.sha }} \
+            -t ${{ env.REGISTRY }}/admin:${ENV_TAG}-latest \
+            -f apps/admin/Dockerfile .
+          docker push ${{ env.REGISTRY }}/admin:${ENV_TAG}-${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/admin:${ENV_TAG}-latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          ENV_TAG=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          SERVICE_NAME="admin-${ENV_TAG}"
+          gcloud run deploy ${SERVICE_NAME} \
+            --image ${{ env.REGISTRY }}/admin:${ENV_TAG}-${{ github.sha }} \
+            --region ${{ env.GCP_REGION }} \
+            --platform managed \
+            --no-allow-unauthenticated \
+            --min-instances 0 \
+            --max-instances 3 \
+            --memory 256Mi \
+            --cpu 1 \
+            --port 80
