@@ -1,8 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { FieldValue } from 'firebase-admin/firestore';
 import { requireAuth } from '../middleware/auth';
-import { asyncHandler } from '../middleware/errorHandler';
+import { asyncHandler, AppError } from '../middleware/errorHandler';
 import { validateBody, validateParams } from '../middleware/validate';
+import { db, COLLECTIONS } from '../config/firebase';
 
 const router = Router();
 
@@ -33,55 +35,73 @@ router.post(
     const { productId, rating, title, comment } =
       req.body as z.infer<typeof createReviewSchema>;
 
-    // TODO: Replace with real Firestore logic
     // 1. Verify the product exists
-    // const productDoc = await db.collection(COLLECTIONS.PRODUCTS).doc(productId).get();
-    // if (!productDoc.exists) throw new AppError('Produit introuvable.', 404);
-    //
-    // 2. Check the user has purchased this product (optional but recommended)
-    // const purchaseSnapshot = await db
-    //   .collection(COLLECTIONS.ORDERS)
-    //   .where('userId', '==', userId)
-    //   .where('items', 'array-contains', { productId })
-    //   .where('status', '==', 'delivered')
-    //   .limit(1)
-    //   .get();
-    //
-    // 3. Check the user hasn't already reviewed this product
-    // const existingReview = await db
-    //   .collection(COLLECTIONS.REVIEWS)
-    //   .where('productId', '==', productId)
-    //   .where('userId', '==', userId)
-    //   .limit(1)
-    //   .get();
-    // if (!existingReview.empty) throw new AppError('Vous avez déjà donné un avis pour ce produit.', 409);
-    //
-    // 4. Create the review
-    // const reviewRef = db.collection(COLLECTIONS.REVIEWS).doc();
-    // await reviewRef.set({
-    //   productId, userId, rating, title, comment,
-    //   status: 'pending', // moderation
-    //   createdAt: FieldValue.serverTimestamp(),
-    // });
-    //
-    // 5. Update product average rating (via Cloud Function or here)
+    const productDoc = await db.collection(COLLECTIONS.PRODUCTS).doc(productId).get();
+    if (!productDoc.exists) {
+      throw new AppError('Produit introuvable.', 404);
+    }
 
-    const mockReview = {
-      id: 'rev_new_001',
+    // 2. Check the user hasn't already reviewed this product
+    const existingReview = await db
+      .collection(COLLECTIONS.REVIEWS)
+      .where('productId', '==', productId)
+      .where('userId', '==', userId)
+      .limit(1)
+      .get();
+
+    if (!existingReview.empty) {
+      throw new AppError('Vous avez déjà donné un avis pour ce produit.', 409);
+    }
+
+    // 3. Create the review
+    const reviewRef = db.collection(COLLECTIONS.REVIEWS).doc();
+    const userName = `${req.user!.firstName || 'Utilisateur'} ${(req.user!.lastName || '').charAt(0)}.`;
+
+    await reviewRef.set({
       productId,
       userId,
-      userName: `${req.user!.firstName || 'Utilisateur'} ${(req.user!.lastName || '').charAt(0)}.`,
+      userName,
       rating,
       title,
       comment,
       status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    // 4. Update product review count
+    const reviewsSnapshot = await db
+      .collection(COLLECTIONS.REVIEWS)
+      .where('productId', '==', productId)
+      .where('status', '==', 'approved')
+      .get();
+
+    const approvedRatings = reviewsSnapshot.docs.map((d) => d.data().rating as number);
+    approvedRatings.push(rating);
+
+    const avgRating =
+      approvedRatings.reduce((sum, r) => sum + r, 0) / approvedRatings.length;
+
+    await productDoc.ref.update({
+      rating: Math.round(avgRating * 10) / 10,
+      reviewCount: approvedRatings.length,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
 
     res.status(201).json({
       success: true,
       message: 'Avis soumis avec succès. Il sera visible après modération.',
-      data: mockReview,
+      data: {
+        id: reviewRef.id,
+        productId,
+        userId,
+        userName,
+        rating,
+        title,
+        comment,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      },
     });
   })
 );
@@ -97,13 +117,43 @@ router.delete(
     const userId = req.user!.uid;
     const { id } = req.params;
 
-    // TODO: Replace with real Firestore logic
-    // const reviewDoc = await db.collection(COLLECTIONS.REVIEWS).doc(id).get();
-    // if (!reviewDoc.exists) throw new AppError('Avis introuvable.', 404);
-    // if (reviewDoc.data().userId !== userId) throw new AppError('Accès refusé.', 403);
-    //
-    // await reviewDoc.ref.delete();
+    const reviewDoc = await db.collection(COLLECTIONS.REVIEWS).doc(id).get();
+
+    if (!reviewDoc.exists) {
+      throw new AppError('Avis introuvable.', 404);
+    }
+
+    const review = reviewDoc.data()!;
+
+    if (review.userId !== userId) {
+      throw new AppError('Accès refusé.', 403);
+    }
+
+    await reviewDoc.ref.delete();
+
     // Recalculate product average rating
+    const reviewsSnapshot = await db
+      .collection(COLLECTIONS.REVIEWS)
+      .where('productId', '==', review.productId)
+      .where('status', '==', 'approved')
+      .get();
+
+    const ratings = reviewsSnapshot.docs.map((d) => d.data().rating as number);
+    const avgRating =
+      ratings.length > 0
+        ? Math.round(
+            (ratings.reduce((sum, r) => sum + r, 0) / ratings.length) * 10
+          ) / 10
+        : 0;
+
+    await db
+      .collection(COLLECTIONS.PRODUCTS)
+      .doc(review.productId)
+      .update({
+        rating: avgRating,
+        reviewCount: ratings.length,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
 
     res.json({
       success: true,

@@ -1,8 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { FieldValue } from 'firebase-admin/firestore';
 import { requireAuth } from '../middleware/auth';
 import { asyncHandler } from '../middleware/errorHandler';
+import { AppError } from '../middleware/errorHandler';
 import { validateBody, validateParams } from '../middleware/validate';
+import { db, COLLECTIONS } from '../config/firebase';
 
 const router = Router();
 
@@ -34,6 +37,17 @@ const itemIdParamsSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Helper: compute cart totals
+// ---------------------------------------------------------------------------
+function computeCartTotals(items: Array<{ price: number; quantity: number }>) {
+  const itemCount = items.reduce((sum, i) => sum + i.quantity, 0);
+  const subtotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
+  // Free shipping above 150 TND, otherwise 7 TND
+  const shipping = subtotal >= 150 ? 0 : 7;
+  return { itemCount, subtotal, shipping, total: subtotal + shipping };
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/cart — Get the current user's cart
 // ---------------------------------------------------------------------------
 router.get(
@@ -41,55 +55,78 @@ router.get(
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
 
-    // TODO: Replace with real Firestore query
-    // const cartDoc = await db
-    //   .collection(COLLECTIONS.CARTS)
-    //   .doc(userId)
-    //   .get();
-    //
-    // if (!cartDoc.exists) {
-    //   return res.json({ success: true, data: { items: [], total: 0 } });
-    // }
-    // const cart = cartDoc.data();
-    // Enrich items with current product data (price, stock, images)
+    const cartDoc = await db.collection(COLLECTIONS.CARTS).doc(userId).get();
 
-    const mockCart = {
-      userId,
-      items: [
-        {
-          itemId: 'item_001',
-          productId: 'prod_001',
-          name: 'Manette PlayStation 5 DualSense',
-          slug: 'manette-ps5-dualsense',
-          price: 189.0,
-          quantity: 1,
-          image: 'https://placeholder.co/200x200',
-          variant: null,
-          subtotal: 189.0,
+    if (!cartDoc.exists) {
+      res.json({
+        success: true,
+        data: {
+          userId,
+          items: [],
+          itemCount: 0,
+          subtotal: 0,
+          shipping: 0,
+          total: 0,
+          currency: 'TND',
+          updatedAt: new Date().toISOString(),
         },
-        {
-          itemId: 'item_002',
-          productId: 'prod_002',
-          name: 'FIFA 25 - PS5',
-          slug: 'fifa-25-ps5',
-          price: 149.0,
-          quantity: 2,
-          image: 'https://placeholder.co/200x200',
-          variant: null,
-          subtotal: 298.0,
-        },
-      ],
-      itemCount: 3,
-      subtotal: 487.0,
-      shipping: 7.0,
-      total: 494.0,
-      currency: 'TND',
-      updatedAt: '2025-02-15T16:00:00Z',
-    };
+      });
+      return;
+    }
+
+    const cart = cartDoc.data()!;
+    const items: Array<Record<string, unknown>> = cart.items || [];
+
+    // Enrich items with current product data (price, stock, images)
+    const enrichedItems = await Promise.all(
+      items.map(async (item) => {
+        const productDoc = await db
+          .collection(COLLECTIONS.PRODUCTS)
+          .doc(item.productId as string)
+          .get();
+
+        if (!productDoc.exists) {
+          return { ...item, available: false };
+        }
+
+        const product = productDoc.data()!;
+        return {
+          itemId: item.itemId,
+          productId: item.productId,
+          name: product.name || item.name,
+          slug: product.slug || item.slug,
+          price: product.price ?? item.price,
+          quantity: item.quantity,
+          image: product.images?.[0] || item.image || '',
+          variant: item.variant || null,
+          stock: product.stock ?? 0,
+          available: (product.stock ?? 0) >= (item.quantity as number),
+          subtotal: (product.price ?? item.price as number) * (item.quantity as number),
+        };
+      })
+    );
+
+    const { itemCount, subtotal, shipping, total } = computeCartTotals(
+      enrichedItems.map((i) => ({
+        price: (i.price as number) || 0,
+        quantity: (i.quantity as number) || 0,
+      }))
+    );
 
     res.json({
       success: true,
-      data: mockCart,
+      data: {
+        userId,
+        items: enrichedItems,
+        itemCount,
+        subtotal,
+        shipping,
+        total,
+        currency: 'TND',
+        updatedAt: cart.updatedAt
+          ? cart.updatedAt.toDate?.().toISOString() || cart.updatedAt
+          : new Date().toISOString(),
+      },
     });
   })
 );
@@ -104,34 +141,91 @@ router.post(
     const userId = req.user!.uid;
     const { productId, quantity, variant } = req.body as z.infer<typeof addItemSchema>;
 
-    // TODO: Replace with real Firestore logic
     // 1. Verify product exists and is in stock
-    // const productDoc = await db.collection(COLLECTIONS.PRODUCTS).doc(productId).get();
-    // if (!productDoc.exists) throw new AppError('Produit introuvable.', 404);
-    // const product = productDoc.data();
-    // if (product.stock < quantity) throw new AppError('Stock insuffisant.', 400);
-    //
-    // 2. Get or create cart
-    // const cartRef = db.collection(COLLECTIONS.CARTS).doc(userId);
-    // const cartDoc = await cartRef.get();
-    //
-    // 3. Add item or increment quantity if already exists
-    // await cartRef.set({ items: [...], updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    const productDoc = await db.collection(COLLECTIONS.PRODUCTS).doc(productId).get();
+    if (!productDoc.exists) {
+      throw new AppError('Produit introuvable.', 404);
+    }
 
-    const mockAddedItem = {
-      itemId: 'item_003',
-      productId,
-      name: 'Produit ajouté',
-      price: 189.0,
-      quantity,
-      variant: variant || null,
-      subtotal: 189.0 * quantity,
-    };
+    const product = productDoc.data()!;
+
+    if (product.status === 'inactive' || product.status === 'archived') {
+      throw new AppError('Ce produit n\'est plus disponible.', 400);
+    }
+
+    if ((product.stock ?? 0) < quantity) {
+      throw new AppError(
+        `Stock insuffisant. Seulement ${product.stock ?? 0} unité(s) disponible(s).`,
+        400
+      );
+    }
+
+    // 2. Get or create cart
+    const cartRef = db.collection(COLLECTIONS.CARTS).doc(userId);
+    const cartDoc = await cartRef.get();
+
+    let items: Array<Record<string, unknown>> = [];
+    if (cartDoc.exists) {
+      items = cartDoc.data()!.items || [];
+    }
+
+    // 3. Check if item already exists (same product + variant)
+    const variantKey = variant ? JSON.stringify(variant) : '';
+    const existingIndex = items.findIndex(
+      (i) =>
+        i.productId === productId &&
+        (JSON.stringify(i.variant || '') === variantKey || (!i.variant && !variant))
+    );
+
+    const itemId =
+      existingIndex >= 0
+        ? (items[existingIndex].itemId as string)
+        : `item_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+    if (existingIndex >= 0) {
+      const newQty = (items[existingIndex].quantity as number) + quantity;
+      if (newQty > 10) {
+        throw new AppError('Quantité maximale de 10 par article.', 400);
+      }
+      if ((product.stock ?? 0) < newQty) {
+        throw new AppError(
+          `Stock insuffisant. Seulement ${product.stock ?? 0} unité(s) disponible(s).`,
+          400
+        );
+      }
+      items[existingIndex].quantity = newQty;
+    } else {
+      items.push({
+        itemId,
+        productId,
+        name: product.name,
+        slug: product.slug,
+        price: product.price,
+        quantity,
+        image: product.images?.[0] || '',
+        variant: variant || null,
+      });
+    }
+
+    await cartRef.set(
+      { items, updatedAt: FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+
+    const addedItem = items.find((i) => i.itemId === itemId)!;
 
     res.status(201).json({
       success: true,
       message: 'Article ajouté au panier.',
-      data: mockAddedItem,
+      data: {
+        itemId,
+        productId,
+        name: product.name,
+        price: product.price,
+        quantity: addedItem.quantity,
+        variant: addedItem.variant || null,
+        subtotal: (product.price as number) * (addedItem.quantity as number),
+      },
     });
   })
 );
@@ -148,16 +242,28 @@ router.patch(
     const { itemId } = req.params;
     const { quantity } = req.body as z.infer<typeof updateItemSchema>;
 
-    // TODO: Replace with real Firestore logic
-    // const cartRef = db.collection(COLLECTIONS.CARTS).doc(userId);
-    // const cartDoc = await cartRef.get();
-    // if (!cartDoc.exists) throw new AppError('Panier introuvable.', 404);
-    //
-    // Find item in cart, verify stock for new quantity
-    // If quantity is 0, remove the item
-    // Update the cart document
+    const cartRef = db.collection(COLLECTIONS.CARTS).doc(userId);
+    const cartDoc = await cartRef.get();
 
+    if (!cartDoc.exists) {
+      throw new AppError('Panier introuvable.', 404);
+    }
+
+    const items: Array<Record<string, unknown>> = cartDoc.data()!.items || [];
+    const itemIndex = items.findIndex((i) => i.itemId === itemId);
+
+    if (itemIndex < 0) {
+      throw new AppError('Article introuvable dans le panier.', 404);
+    }
+
+    // If quantity is 0, remove the item
     if (quantity === 0) {
+      items.splice(itemIndex, 1);
+      await cartRef.update({
+        items,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
       res.json({
         success: true,
         message: 'Article retiré du panier.',
@@ -166,13 +272,37 @@ router.patch(
       return;
     }
 
+    // Verify stock
+    const productDoc = await db
+      .collection(COLLECTIONS.PRODUCTS)
+      .doc(items[itemIndex].productId as string)
+      .get();
+
+    if (productDoc.exists) {
+      const product = productDoc.data()!;
+      if ((product.stock ?? 0) < quantity) {
+        throw new AppError(
+          `Stock insuffisant. Seulement ${product.stock ?? 0} unité(s) disponible(s).`,
+          400
+        );
+      }
+    }
+
+    items[itemIndex].quantity = quantity;
+
+    await cartRef.update({
+      items,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    const price = items[itemIndex].price as number;
     res.json({
       success: true,
       message: 'Quantité mise à jour.',
       data: {
         itemId,
         quantity,
-        subtotal: 189.0 * quantity,
+        subtotal: price * quantity,
       },
     });
   })
@@ -188,14 +318,24 @@ router.delete(
     const userId = req.user!.uid;
     const { itemId } = req.params;
 
-    // TODO: Replace with real Firestore logic
-    // const cartRef = db.collection(COLLECTIONS.CARTS).doc(userId);
-    // const cartDoc = await cartRef.get();
-    // if (!cartDoc.exists) throw new AppError('Panier introuvable.', 404);
-    //
-    // Filter out the item from items array
-    // Recalculate totals
-    // await cartRef.update({ items: updatedItems, updatedAt: FieldValue.serverTimestamp() });
+    const cartRef = db.collection(COLLECTIONS.CARTS).doc(userId);
+    const cartDoc = await cartRef.get();
+
+    if (!cartDoc.exists) {
+      throw new AppError('Panier introuvable.', 404);
+    }
+
+    const items: Array<Record<string, unknown>> = cartDoc.data()!.items || [];
+    const updatedItems = items.filter((i) => i.itemId !== itemId);
+
+    if (updatedItems.length === items.length) {
+      throw new AppError('Article introuvable dans le panier.', 404);
+    }
+
+    await cartRef.update({
+      items: updatedItems,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
 
     res.json({
       success: true,

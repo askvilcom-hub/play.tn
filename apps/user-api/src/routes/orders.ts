@@ -1,8 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { FieldValue } from 'firebase-admin/firestore';
 import { requireAuth } from '../middleware/auth';
-import { asyncHandler } from '../middleware/errorHandler';
+import { asyncHandler, AppError } from '../middleware/errorHandler';
 import { validateBody, validateQuery, validateParams } from '../middleware/validate';
+import { db, COLLECTIONS } from '../config/firebase';
 
 const router = Router();
 
@@ -45,6 +47,38 @@ const orderIdParamsSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Helper: generate order number
+// ---------------------------------------------------------------------------
+function generateOrderNumber(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const rand = Math.random().toString(36).slice(2, 7).toUpperCase();
+  return `PLY-${year}-${rand}`;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: compute shipping fee by governorate
+// ---------------------------------------------------------------------------
+function computeShippingFee(governorate: string, subtotal: number): number {
+  // Free shipping above 150 TND
+  if (subtotal >= 150) return 0;
+
+  const tunis = ['tunis', 'ariana', 'ben arous', 'manouba'];
+  const gov = governorate.toLowerCase();
+
+  if (tunis.some((t) => gov.includes(t))) return 7;
+
+  const north = ['bizerte', 'béja', 'beja', 'jendouba', 'le kef', 'siliana', 'nabeul', 'zaghouan'];
+  if (north.some((n) => gov.includes(n))) return 9;
+
+  const center = ['sousse', 'monastir', 'mahdia', 'sfax', 'kairouan', 'kasserine', 'sidi bouzid'];
+  if (center.some((c) => gov.includes(c))) return 10;
+
+  // South and others
+  return 12;
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/orders — Create an order from the current cart
 // ---------------------------------------------------------------------------
 router.post(
@@ -55,76 +89,177 @@ router.post(
     const { shippingAddress, paymentMethod, couponCode, notes } =
       req.body as z.infer<typeof createOrderSchema>;
 
-    // TODO: Replace with real Firestore logic
     // 1. Get user's cart
-    // const cartDoc = await db.collection(COLLECTIONS.CARTS).doc(userId).get();
-    // if (!cartDoc.exists || cartDoc.data().items.length === 0) {
-    //   throw new AppError('Votre panier est vide.', 400);
-    // }
-    //
-    // 2. Validate stock for each item
-    // for (const item of cart.items) {
-    //   const productDoc = await db.collection(COLLECTIONS.PRODUCTS).doc(item.productId).get();
-    //   if (productDoc.data().stock < item.quantity) throw new AppError('Stock insuffisant...', 400);
-    // }
-    //
-    // 3. Apply coupon if provided
-    // if (couponCode) { validate and apply discount }
-    //
-    // 4. Create order document
-    // const orderRef = db.collection(COLLECTIONS.ORDERS).doc();
-    // await orderRef.set({ ...orderData, createdAt: FieldValue.serverTimestamp() });
-    //
-    // 5. If payment is card, create Stripe PaymentIntent
-    // if (paymentMethod === 'card') {
-    //   const paymentIntent = await stripe.paymentIntents.create({ ... });
-    // }
-    //
-    // 6. Clear the cart
-    // await db.collection(COLLECTIONS.CARTS).doc(userId).delete();
-    //
-    // 7. Decrement product stock
+    const cartDoc = await db.collection(COLLECTIONS.CARTS).doc(userId).get();
+    if (!cartDoc.exists || !cartDoc.data()?.items?.length) {
+      throw new AppError('Votre panier est vide.', 400);
+    }
 
-    const mockOrder = {
-      id: 'ord_20250215_001',
-      orderNumber: 'PLY-2025-00042',
+    const cartItems = cartDoc.data()!.items as Array<Record<string, unknown>>;
+
+    // 2. Validate stock and get current prices for each item
+    const orderItems: Array<Record<string, unknown>> = [];
+    let subtotal = 0;
+
+    for (const item of cartItems) {
+      const productDoc = await db
+        .collection(COLLECTIONS.PRODUCTS)
+        .doc(item.productId as string)
+        .get();
+
+      if (!productDoc.exists) {
+        throw new AppError(
+          `Le produit "${item.name}" n'est plus disponible.`,
+          400
+        );
+      }
+
+      const product = productDoc.data()!;
+      const qty = item.quantity as number;
+
+      if ((product.stock ?? 0) < qty) {
+        throw new AppError(
+          `Stock insuffisant pour "${product.name}". Seulement ${product.stock ?? 0} unité(s) disponible(s).`,
+          400
+        );
+      }
+
+      const price = product.price as number;
+      const itemTotal = price * qty;
+      subtotal += itemTotal;
+
+      orderItems.push({
+        productId: item.productId,
+        name: product.name,
+        slug: product.slug,
+        price,
+        quantity: qty,
+        image: product.images?.[0] || item.image || '',
+        variant: item.variant || null,
+        subtotal: itemTotal,
+      });
+    }
+
+    // 3. Apply coupon if provided
+    let discount = 0;
+    if (couponCode) {
+      const couponSnapshot = await db
+        .collection(COLLECTIONS.COUPONS)
+        .where('code', '==', couponCode.toUpperCase())
+        .where('isActive', '==', true)
+        .limit(1)
+        .get();
+
+      if (!couponSnapshot.empty) {
+        const coupon = couponSnapshot.docs[0].data();
+        const now = Date.now();
+
+        // Verify coupon validity
+        const startsAt = coupon.startsAt?._seconds
+          ? coupon.startsAt._seconds * 1000
+          : 0;
+        const expiresAt = coupon.expiresAt?._seconds
+          ? coupon.expiresAt._seconds * 1000
+          : Infinity;
+
+        if (now >= startsAt && now <= expiresAt) {
+          if (
+            coupon.usageLimit === 0 ||
+            (coupon.usedCount ?? 0) < coupon.usageLimit
+          ) {
+            if (coupon.discountType === 'percentage') {
+              discount = subtotal * (coupon.discountValue / 100);
+              if (coupon.maximumDiscount) {
+                discount = Math.min(discount, coupon.maximumDiscount);
+              }
+            } else {
+              discount = coupon.discountValue;
+            }
+
+            // Increment usage count
+            await couponSnapshot.docs[0].ref.update({
+              usedCount: FieldValue.increment(1),
+            });
+          }
+        }
+      }
+    }
+
+    // 4. Compute totals
+    const shipping = computeShippingFee(shippingAddress.governorate, subtotal);
+    const total = subtotal - discount + shipping;
+
+    // 5. Create order document
+    const orderNumber = generateOrderNumber();
+    const orderRef = db.collection(COLLECTIONS.ORDERS).doc();
+
+    const orderData = {
+      orderNumber,
       userId,
+      userEmail: req.user!.email || '',
       status: 'pending',
-      items: [
-        {
-          productId: 'prod_001',
-          name: 'Manette PlayStation 5 DualSense',
-          price: 189.0,
-          quantity: 1,
-          subtotal: 189.0,
-        },
-        {
-          productId: 'prod_002',
-          name: 'FIFA 25 - PS5',
-          price: 149.0,
-          quantity: 2,
-          subtotal: 298.0,
-        },
-      ],
+      items: orderItems,
       shippingAddress,
       paymentMethod,
-      couponCode: couponCode || null,
+      couponCode: couponCode?.toUpperCase() || null,
       notes: notes || null,
-      subtotal: 487.0,
-      shipping: 7.0,
-      discount: 0,
-      total: 494.0,
+      subtotal,
+      shipping,
+      discount,
+      total,
       currency: 'TND',
       paymentStatus: paymentMethod === 'cash_on_delivery' ? 'pending' : 'awaiting_payment',
-      clientSecret:
-        paymentMethod === 'card' ? 'pi_mock_secret_placeholder' : undefined,
-      createdAt: new Date().toISOString(),
+      timeline: [
+        { status: 'pending', date: new Date().toISOString() },
+      ],
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     };
+
+    await orderRef.set(orderData);
+
+    // 6. Decrement product stock
+    const batch = db.batch();
+    for (const item of orderItems) {
+      const productRef = db
+        .collection(COLLECTIONS.PRODUCTS)
+        .doc(item.productId as string);
+      batch.update(productRef, {
+        stock: FieldValue.increment(-(item.quantity as number)),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+
+    // 7. Clear the cart
+    const cartRef = db.collection(COLLECTIONS.CARTS).doc(userId);
+    batch.update(cartRef, {
+      items: [],
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    await batch.commit();
 
     res.status(201).json({
       success: true,
       message: 'Commande créée avec succès.',
-      data: mockOrder,
+      data: {
+        id: orderRef.id,
+        orderNumber,
+        userId,
+        status: 'pending',
+        items: orderItems,
+        shippingAddress,
+        paymentMethod,
+        couponCode: couponCode?.toUpperCase() || null,
+        notes: notes || null,
+        subtotal,
+        shipping,
+        discount,
+        total,
+        currency: 'TND',
+        paymentStatus: paymentMethod === 'cash_on_delivery' ? 'pending' : 'awaiting_payment',
+        createdAt: new Date().toISOString(),
+      },
     });
   })
 );
@@ -140,52 +275,55 @@ router.get(
     const { page, limit, status } =
       req.query as unknown as z.infer<typeof listOrdersQuerySchema>;
 
-    // TODO: Replace with real Firestore query
-    // let query = db
-    //   .collection(COLLECTIONS.ORDERS)
-    //   .where('userId', '==', userId)
-    //   .orderBy('createdAt', 'desc');
-    //
-    // if (status) query = query.where('status', '==', status);
-    // Apply pagination with startAfter/limit
+    const pageNum = page ?? 1;
+    const limitNum = limit ?? 10;
 
-    const mockOrders = [
-      {
-        id: 'ord_20250215_001',
-        orderNumber: 'PLY-2025-00042',
-        status: 'delivered',
-        itemCount: 3,
-        total: 494.0,
-        currency: 'TND',
-        paymentMethod: 'cash_on_delivery',
-        paymentStatus: 'paid',
-        createdAt: '2025-02-10T10:00:00Z',
-        deliveredAt: '2025-02-14T16:30:00Z',
-      },
-      {
-        id: 'ord_20250208_002',
-        orderNumber: 'PLY-2025-00038',
-        status: 'shipped',
-        itemCount: 1,
-        total: 89.0,
-        currency: 'TND',
-        paymentMethod: 'card',
-        paymentStatus: 'paid',
-        createdAt: '2025-02-08T14:00:00Z',
-      },
-    ];
+    let query = db
+      .collection(COLLECTIONS.ORDERS)
+      .where('userId', '==', userId)
+      .orderBy('createdAt', 'desc') as FirebaseFirestore.Query;
+
+    if (status) {
+      query = query.where('status', '==', status);
+    }
+
+    // Get total count
+    const countSnapshot = await query.count().get();
+    const total = countSnapshot.data().count;
+
+    // Paginate
+    const offset = (pageNum - 1) * limitNum;
+    const snapshot = await query.offset(offset).limit(limitNum).get();
+
+    const orders = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        orderNumber: data.orderNumber,
+        status: data.status,
+        itemCount: data.items?.length || 0,
+        total: data.total,
+        currency: data.currency || 'TND',
+        paymentMethod: data.paymentMethod,
+        paymentStatus: data.paymentStatus,
+        createdAt: data.createdAt?.toDate?.().toISOString() || data.createdAt,
+        deliveredAt: data.deliveredAt?.toDate?.().toISOString() || data.deliveredAt || null,
+      };
+    });
+
+    const totalPages = Math.ceil(total / limitNum);
 
     res.json({
       success: true,
       data: {
-        orders: mockOrders,
+        orders,
         pagination: {
-          page: page ?? 1,
-          limit: limit ?? 10,
-          total: 5,
-          totalPages: 1,
-          hasNext: false,
-          hasPrev: false,
+          page: pageNum,
+          limit: limitNum,
+          total,
+          totalPages,
+          hasNext: pageNum < totalPages,
+          hasPrev: pageNum > 1,
         },
       },
     });
@@ -202,67 +340,40 @@ router.get(
     const userId = req.user!.uid;
     const { id } = req.params;
 
-    // TODO: Replace with real Firestore query
-    // const orderDoc = await db.collection(COLLECTIONS.ORDERS).doc(id).get();
-    // if (!orderDoc.exists) throw new AppError('Commande introuvable.', 404);
-    // const order = orderDoc.data();
-    // if (order.userId !== userId) throw new AppError('Accès refusé.', 403);
+    const orderDoc = await db.collection(COLLECTIONS.ORDERS).doc(id).get();
 
-    const mockOrder = {
-      id,
-      orderNumber: 'PLY-2025-00042',
-      userId,
-      status: 'shipped',
-      items: [
-        {
-          productId: 'prod_001',
-          name: 'Manette PlayStation 5 DualSense',
-          slug: 'manette-ps5-dualsense',
-          price: 189.0,
-          quantity: 1,
-          image: 'https://placeholder.co/200x200',
-          subtotal: 189.0,
-        },
-        {
-          productId: 'prod_002',
-          name: 'FIFA 25 - PS5',
-          slug: 'fifa-25-ps5',
-          price: 149.0,
-          quantity: 2,
-          image: 'https://placeholder.co/200x200',
-          subtotal: 298.0,
-        },
-      ],
-      shippingAddress: {
-        firstName: 'Ahmed',
-        lastName: 'Ben Ali',
-        address: '15 Rue de la Liberté',
-        city: 'Tunis',
-        governorate: 'Tunis',
-        postalCode: '1000',
-        phone: '+216 50 123 456',
-      },
-      paymentMethod: 'cash_on_delivery',
-      subtotal: 487.0,
-      shipping: 7.0,
-      discount: 0,
-      total: 494.0,
-      currency: 'TND',
-      paymentStatus: 'pending',
-      timeline: [
-        { status: 'pending', date: '2025-02-10T10:00:00Z' },
-        { status: 'confirmed', date: '2025-02-10T10:15:00Z' },
-        { status: 'processing', date: '2025-02-11T09:00:00Z' },
-        { status: 'shipped', date: '2025-02-12T14:00:00Z' },
-      ],
-      trackingNumber: 'TN-TRACK-00042',
-      createdAt: '2025-02-10T10:00:00Z',
-      updatedAt: '2025-02-12T14:00:00Z',
-    };
+    if (!orderDoc.exists) {
+      throw new AppError('Commande introuvable.', 404);
+    }
+
+    const order = orderDoc.data()!;
+
+    if (order.userId !== userId) {
+      throw new AppError('Accès refusé.', 403);
+    }
 
     res.json({
       success: true,
-      data: mockOrder,
+      data: {
+        id: orderDoc.id,
+        orderNumber: order.orderNumber,
+        userId: order.userId,
+        status: order.status,
+        items: order.items,
+        shippingAddress: order.shippingAddress,
+        paymentMethod: order.paymentMethod,
+        subtotal: order.subtotal,
+        shipping: order.shipping,
+        discount: order.discount,
+        total: order.total,
+        currency: order.currency || 'TND',
+        paymentStatus: order.paymentStatus,
+        timeline: order.timeline || [],
+        trackingNumber: order.trackingNumber || null,
+        notes: order.notes || null,
+        createdAt: order.createdAt?.toDate?.().toISOString() || order.createdAt,
+        updatedAt: order.updatedAt?.toDate?.().toISOString() || order.updatedAt,
+      },
     });
   })
 );

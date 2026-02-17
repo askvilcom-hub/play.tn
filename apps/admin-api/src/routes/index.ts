@@ -2,6 +2,11 @@ import { Router } from 'express';
 import productsRouter from './products';
 import ordersRouter from './orders';
 import dashboardRouter from './dashboard';
+import categoriesRouter from './categories';
+import customersRouter from './customers';
+import couponsRouter from './coupons';
+import settingsRouter from './settings';
+import auditLogsRouter from './audit-logs';
 
 /**
  * Aggregateur de routes admin.
@@ -10,41 +15,13 @@ import dashboardRouter from './dashboard';
 
 const router = Router();
 
-// Routes implementees
 router.use('/products', productsRouter);
 router.use('/orders', ordersRouter);
 router.use('/dashboard', dashboardRouter);
-
-// --- Routes placeholder (a implementer) ---
-
-// TODO: Implementer les routes categories
-router.use('/categories', (_req, res) => {
-  res.json({ success: true, message: 'Route categories - TODO', data: [] });
-});
-
-// TODO: Implementer les routes clients
-router.use('/customers', (_req, res) => {
-  res.json({ success: true, message: 'Route customers - TODO', data: [] });
-});
-
-// TODO: Implementer les routes coupons
-router.use('/coupons', (_req, res) => {
-  res.json({ success: true, message: 'Route coupons - TODO', data: [] });
-});
-
-// TODO: Implementer les routes blog
-router.use('/blog', (_req, res) => {
-  res.json({ success: true, message: 'Route blog - TODO', data: [] });
-});
-
-// TODO: Implementer les routes parametres
-router.use('/settings', (_req, res) => {
-  res.json({ success: true, message: 'Route settings - TODO', data: {} });
-});
-
-// TODO: Implementer les routes logs d'audit
-router.use('/audit-logs', (_req, res) => {
-  res.json({ success: true, message: 'Route audit-logs - TODO', data: [] });
-});
+router.use('/categories', categoriesRouter);
+router.use('/customers', customersRouter);
+router.use('/coupons', couponsRouter);
+router.use('/settings', settingsRouter);
+router.use('/audit-logs', auditLogsRouter);
 
 export default router;

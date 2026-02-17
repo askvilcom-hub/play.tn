@@ -1,8 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { FieldValue } from 'firebase-admin/firestore';
 import { requireAuth } from '../middleware/auth';
-import { asyncHandler } from '../middleware/errorHandler';
+import { asyncHandler, AppError } from '../middleware/errorHandler';
 import { validateBody } from '../middleware/validate';
+import { db, auth, COLLECTIONS } from '../config/firebase';
 
 const router = Router();
 
@@ -46,42 +48,61 @@ router.post(
     const { email, firstName, lastName, phone, firebaseToken } =
       req.body as z.infer<typeof registerSchema>;
 
-    // TODO: Replace with real Firebase / Firestore logic
     // 1. Verify the Firebase token to get the uid
-    // const decodedToken = await auth.verifyIdToken(firebaseToken);
-    //
-    // 2. Check if user doc already exists
-    // const existingUser = await db.collection(COLLECTIONS.USERS).doc(decodedToken.uid).get();
-    // if (existingUser.exists) throw new AppError('Un compte existe déjà avec cet e-mail.', 409);
-    //
-    // 3. Create user document in Firestore
-    // await db.collection(COLLECTIONS.USERS).doc(decodedToken.uid).set({
-    //   email,
-    //   firstName,
-    //   lastName,
-    //   phone: phone || null,
-    //   role: 'customer',
-    //   createdAt: FieldValue.serverTimestamp(),
-    //   updatedAt: FieldValue.serverTimestamp(),
-    // });
-    //
-    // 4. Create an empty cart for the user
-    // await db.collection(COLLECTIONS.CARTS).doc(decodedToken.uid).set({ items: [] });
+    let decodedToken;
+    try {
+      decodedToken = await auth.verifyIdToken(firebaseToken);
+    } catch {
+      throw new AppError('Token Firebase invalide ou expiré.', 401);
+    }
 
-    const mockUser = {
-      id: 'uid_new_user_001',
+    // 2. Check if user doc already exists
+    const existingUser = await db
+      .collection(COLLECTIONS.USERS)
+      .doc(decodedToken.uid)
+      .get();
+
+    if (existingUser.exists) {
+      throw new AppError('Un compte existe déjà avec cet e-mail.', 409);
+    }
+
+    // 3. Create user document in Firestore
+    const userData = {
       email,
       firstName,
       lastName,
       phone: phone || null,
       role: 'customer',
-      createdAt: new Date().toISOString(),
+      addresses: [],
+      wishlist: [],
+      isActive: true,
+      emailVerified: decodedToken.email_verified || false,
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     };
+
+    await db.collection(COLLECTIONS.USERS).doc(decodedToken.uid).set(userData);
+
+    // 4. Create an empty cart for the user
+    await db.collection(COLLECTIONS.CARTS).doc(decodedToken.uid).set({
+      items: [],
+      updatedAt: FieldValue.serverTimestamp(),
+    });
 
     res.status(201).json({
       success: true,
       message: 'Compte créé avec succès.',
-      data: { user: mockUser },
+      data: {
+        user: {
+          id: decodedToken.uid,
+          email,
+          firstName,
+          lastName,
+          phone: phone || null,
+          role: 'customer',
+          createdAt: new Date().toISOString(),
+        },
+      },
     });
   })
 );
@@ -95,38 +116,51 @@ router.post(
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
     const { firebaseToken } = req.body as z.infer<typeof loginSchema>;
 
-    // TODO: Replace with real Firebase / Firestore logic
     // 1. Verify the Firebase token
-    // const decodedToken = await auth.verifyIdToken(firebaseToken);
-    //
-    // 2. Get user document from Firestore
-    // const userDoc = await db.collection(COLLECTIONS.USERS).doc(decodedToken.uid).get();
-    // if (!userDoc.exists) throw new AppError('Utilisateur introuvable. Veuillez vous inscrire.', 404);
-    //
-    // 3. Update last login timestamp
-    // await userDoc.ref.update({ lastLoginAt: FieldValue.serverTimestamp() });
+    let decodedToken;
+    try {
+      decodedToken = await auth.verifyIdToken(firebaseToken);
+    } catch {
+      throw new AppError('Token Firebase invalide ou expiré.', 401);
+    }
 
-    const mockUser = {
-      id: 'uid_user_001',
-      email: 'ahmed@example.com',
-      firstName: 'Ahmed',
-      lastName: 'Ben Ali',
-      phone: '+216 50 123 456',
-      role: 'customer',
-      address: {
-        address: '15 Rue de la Liberté',
-        city: 'Tunis',
-        governorate: 'Tunis',
-        postalCode: '1000',
-      },
-      createdAt: '2025-01-10T08:00:00Z',
-      lastLoginAt: new Date().toISOString(),
-    };
+    // 2. Get user document from Firestore
+    const userDoc = await db
+      .collection(COLLECTIONS.USERS)
+      .doc(decodedToken.uid)
+      .get();
+
+    if (!userDoc.exists) {
+      throw new AppError(
+        'Utilisateur introuvable. Veuillez vous inscrire.',
+        404
+      );
+    }
+
+    const userData = userDoc.data()!;
+
+    // 3. Update last login timestamp
+    await userDoc.ref.update({
+      lastLoginAt: FieldValue.serverTimestamp(),
+    });
 
     res.json({
       success: true,
       message: 'Connexion réussie.',
-      data: { user: mockUser },
+      data: {
+        user: {
+          id: decodedToken.uid,
+          email: userData.email,
+          firstName: userData.firstName,
+          lastName: userData.lastName,
+          phone: userData.phone || null,
+          role: userData.role || 'customer',
+          address: userData.address || null,
+          addresses: userData.addresses || [],
+          createdAt: userData.createdAt?.toDate?.().toISOString() || userData.createdAt,
+          lastLoginAt: new Date().toISOString(),
+        },
+      },
     });
   })
 );
@@ -140,32 +174,38 @@ router.get(
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
 
-    // TODO: Replace with real Firestore query
-    // const userDoc = await db.collection(COLLECTIONS.USERS).doc(userId).get();
-    // if (!userDoc.exists) throw new AppError('Profil introuvable.', 404);
-    // const userData = userDoc.data();
+    const userDoc = await db.collection(COLLECTIONS.USERS).doc(userId).get();
 
-    const mockProfile = {
-      id: userId,
-      email: req.user!.email || 'ahmed@example.com',
-      firstName: req.user!.firstName || 'Ahmed',
-      lastName: req.user!.lastName || 'Ben Ali',
-      phone: '+216 50 123 456',
-      role: req.user!.role || 'customer',
-      address: {
-        address: '15 Rue de la Liberté',
-        city: 'Tunis',
-        governorate: 'Tunis',
-        postalCode: '1000',
-      },
-      orderCount: 5,
-      createdAt: '2025-01-10T08:00:00Z',
-      updatedAt: '2025-02-15T12:00:00Z',
-    };
+    if (!userDoc.exists) {
+      throw new AppError('Profil introuvable.', 404);
+    }
+
+    const userData = userDoc.data()!;
+
+    // Get order count
+    const ordersSnapshot = await db
+      .collection(COLLECTIONS.ORDERS)
+      .where('userId', '==', userId)
+      .count()
+      .get();
+    const orderCount = ordersSnapshot.data().count;
 
     res.json({
       success: true,
-      data: mockProfile,
+      data: {
+        id: userId,
+        email: userData.email,
+        firstName: userData.firstName,
+        lastName: userData.lastName,
+        phone: userData.phone || null,
+        role: userData.role || 'customer',
+        address: userData.address || null,
+        addresses: userData.addresses || [],
+        wishlist: userData.wishlist || [],
+        orderCount,
+        createdAt: userData.createdAt?.toDate?.().toISOString() || userData.createdAt,
+        updatedAt: userData.updatedAt?.toDate?.().toISOString() || userData.updatedAt,
+      },
     });
   })
 );
@@ -181,39 +221,35 @@ router.patch(
     const userId = req.user!.uid;
     const updates = req.body as z.infer<typeof updateProfileSchema>;
 
-    // TODO: Replace with real Firestore logic
-    // const userRef = db.collection(COLLECTIONS.USERS).doc(userId);
-    // const userDoc = await userRef.get();
-    // if (!userDoc.exists) throw new AppError('Profil introuvable.', 404);
-    //
-    // await userRef.update({
-    //   ...updates,
-    //   updatedAt: FieldValue.serverTimestamp(),
-    // });
-    //
-    // const updatedDoc = await userRef.get();
-    // const updatedData = updatedDoc.data();
+    const userRef = db.collection(COLLECTIONS.USERS).doc(userId);
+    const userDoc = await userRef.get();
 
-    const mockUpdatedProfile = {
-      id: userId,
-      email: req.user!.email || 'ahmed@example.com',
-      firstName: updates.firstName || req.user!.firstName || 'Ahmed',
-      lastName: updates.lastName || req.user!.lastName || 'Ben Ali',
-      phone: updates.phone || '+216 50 123 456',
-      role: req.user!.role || 'customer',
-      address: updates.address || {
-        address: '15 Rue de la Liberté',
-        city: 'Tunis',
-        governorate: 'Tunis',
-        postalCode: '1000',
-      },
-      updatedAt: new Date().toISOString(),
-    };
+    if (!userDoc.exists) {
+      throw new AppError('Profil introuvable.', 404);
+    }
+
+    await userRef.update({
+      ...updates,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    const updatedDoc = await userRef.get();
+    const updatedData = updatedDoc.data()!;
 
     res.json({
       success: true,
       message: 'Profil mis à jour avec succès.',
-      data: mockUpdatedProfile,
+      data: {
+        id: userId,
+        email: updatedData.email,
+        firstName: updatedData.firstName,
+        lastName: updatedData.lastName,
+        phone: updatedData.phone || null,
+        role: updatedData.role || 'customer',
+        address: updatedData.address || null,
+        addresses: updatedData.addresses || [],
+        updatedAt: updatedData.updatedAt?.toDate?.().toISOString() || new Date().toISOString(),
+      },
     });
   })
 );

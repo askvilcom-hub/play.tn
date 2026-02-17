@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { asyncHandler } from '../middleware/errorHandler';
 import { validateQuery } from '../middleware/validate';
+import { db, COLLECTIONS } from '../config/firebase';
 
 const router = Router();
 
@@ -32,67 +33,98 @@ router.get(
     const { q, page, limit, category, minPrice, maxPrice, sort } =
       req.query as unknown as z.infer<typeof searchQuerySchema>;
 
-    // TODO: Replace with real search implementation
-    // Option A: Simple Firestore text search (limited)
-    // const productsRef = db.collection(COLLECTIONS.PRODUCTS);
-    // const snapshot = await productsRef
-    //   .where('status', '==', 'active')
-    //   .where('searchKeywords', 'array-contains-any', q.toLowerCase().split(' '))
-    //   .limit(limit)
-    //   .get();
-    //
-    // Option B: Algolia / Typesense / Meilisearch integration for full-text search
-    // const results = await searchClient.index('products').search(q, {
-    //   filters: category ? `category = "${category}"` : '',
-    //   page: page - 1,
-    //   hitsPerPage: limit,
-    // });
-    //
-    // Option C: Firestore full-text search with a dedicated search index collection
+    const pageNum = page ?? 1;
+    const limitNum = limit ?? 20;
 
-    const mockResults = [
-      {
-        id: 'prod_001',
-        name: 'Manette PlayStation 5 DualSense',
-        slug: 'manette-ps5-dualsense',
-        price: 189.0,
+    // Build search keywords from query
+    const searchTerms = q
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .split(/\s+/)
+      .filter((t) => t.length >= 2);
+
+    // Firestore doesn't support full-text search natively.
+    // We use array-contains-any on a searchKeywords field.
+    let query = db
+      .collection(COLLECTIONS.PRODUCTS)
+      .where('status', '==', 'active') as FirebaseFirestore.Query;
+
+    if (searchTerms.length > 0) {
+      query = query.where(
+        'searchKeywords',
+        'array-contains-any',
+        searchTerms.slice(0, 10)
+      );
+    }
+
+    if (category) {
+      query = query.where('categorySlug', '==', category);
+    }
+
+    // Apply sorting
+    switch (sort) {
+      case 'price_asc':
+        query = query.orderBy('price', 'asc');
+        break;
+      case 'price_desc':
+        query = query.orderBy('price', 'desc');
+        break;
+      case 'newest':
+        query = query.orderBy('createdAt', 'desc');
+        break;
+      case 'popular':
+        query = query.orderBy('salesCount', 'desc');
+        break;
+      default:
+        break;
+    }
+
+    const snapshot = await query.limit(200).get();
+
+    // Post-filter by price range
+    let results = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        name: data.name,
+        slug: data.slug,
+        price: data.price,
+        originalPrice: data.originalPrice || null,
         currency: 'TND',
-        category: 'accessoires',
-        brand: 'Sony',
-        image: 'https://placeholder.co/400x400',
-        rating: 4.5,
-        reviewCount: 32,
-        inStock: true,
-        highlight: `<em>Manette</em> PlayStation 5 DualSense`,
-      },
-      {
-        id: 'prod_003',
-        name: 'Manette Xbox Series X',
-        slug: 'manette-xbox-series-x',
-        price: 169.0,
-        currency: 'TND',
-        category: 'accessoires',
-        brand: 'Microsoft',
-        image: 'https://placeholder.co/400x400',
-        rating: 4.3,
-        reviewCount: 12,
-        inStock: true,
-        highlight: `<em>Manette</em> Xbox Series X`,
-      },
-    ];
+        category: data.categorySlug || data.category || '',
+        brand: data.brand || '',
+        image: data.images?.[0] || '',
+        rating: data.rating || 0,
+        reviewCount: data.reviewCount || 0,
+        inStock: (data.stock ?? 0) > 0,
+      };
+    });
+
+    if (minPrice !== undefined) {
+      results = results.filter((r) => r.price >= minPrice);
+    }
+    if (maxPrice !== undefined) {
+      results = results.filter((r) => r.price <= maxPrice);
+    }
+
+    const total = results.length;
+    const offset = (pageNum - 1) * limitNum;
+    const paginatedResults = results.slice(offset, offset + limitNum);
+    const totalPages = Math.ceil(total / limitNum);
 
     res.json({
       success: true,
       data: {
         query: q,
-        results: mockResults,
+        results: paginatedResults,
         pagination: {
-          page: page ?? 1,
-          limit: limit ?? 20,
-          total: 2,
-          totalPages: 1,
-          hasNext: false,
-          hasPrev: false,
+          page: pageNum,
+          limit: limitNum,
+          total,
+          totalPages,
+          hasNext: pageNum < totalPages,
+          hasPrev: pageNum > 1,
         },
         filters: { category, minPrice, maxPrice, sort },
       },
