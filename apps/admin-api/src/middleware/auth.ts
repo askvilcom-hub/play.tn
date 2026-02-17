@@ -64,7 +64,7 @@ export async function requireAdmin(
     // Verifier le role admin via les custom claims Firebase
     // TODO: Configurer les custom claims lors de la creation des comptes admin
     // await auth.setCustomUserClaims(uid, { role: 'admin' });
-    const role = decodedToken.role || decodedToken.admin ? 'admin' : 'user';
+    const role = (decodedToken.role || (decodedToken.admin ? 'admin' : 'user'));
 
     if (role !== 'admin') {
       console.warn(

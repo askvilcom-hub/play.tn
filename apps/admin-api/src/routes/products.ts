@@ -1,5 +1,9 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import multer from 'multer';
+import { v4 as uuidv4 } from 'uuid';
+import { db } from '../config/firebase';
+import { bucket, getPublicUrl, ALLOWED_MIME_TYPES, MAX_FILE_SIZE } from '../config/storage';
+import { AuthenticatedRequest } from '../middleware/auth';
 
 /**
  * Routes CRUD pour la gestion des produits.
@@ -8,246 +12,417 @@ import multer from 'multer';
 
 const router = Router();
 
+const productsCol = db.collection('products');
+const auditCol = db.collection('audit_logs');
+
 // Configuration multer pour l'upload d'images
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5 Mo max
+    fileSize: MAX_FILE_SIZE,
     files: 10,
   },
   fileFilter: (_req, file, cb) => {
-    const allowedMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-    if (allowedMimes.includes(file.mimetype)) {
+    if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Type de fichier non autorise. Formats acceptes: JPEG, PNG, WebP, GIF'));
+      cb(new Error('Type de fichier non autorise. Formats acceptes: JPEG, PNG, WebP, GIF, SVG'));
     }
   },
 });
 
-// --- Donnees mock pour le scaffold ---
-const mockProducts = [
-  {
-    id: 'prod_001',
-    name: 'Manette PS5 DualSense',
-    slug: 'manette-ps5-dualsense',
-    price: 189.9,
-    compareAtPrice: 219.0,
-    category: 'Accessoires',
-    brand: 'Sony',
-    stock: 45,
-    status: 'active',
-    images: ['https://via.placeholder.com/300x300?text=PS5+Controller'],
-    createdAt: '2026-01-15T10:30:00Z',
-    updatedAt: '2026-02-10T14:20:00Z',
-  },
-  {
-    id: 'prod_002',
-    name: 'Casque Gaming HyperX Cloud III',
-    slug: 'casque-gaming-hyperx-cloud-iii',
-    price: 259.0,
-    compareAtPrice: null,
-    category: 'Audio',
-    brand: 'HyperX',
-    stock: 23,
-    status: 'active',
-    images: ['https://via.placeholder.com/300x300?text=HyperX+Headset'],
-    createdAt: '2026-01-20T08:00:00Z',
-    updatedAt: '2026-02-05T11:45:00Z',
-  },
-  {
-    id: 'prod_003',
-    name: 'Clavier Mecanique Razer BlackWidow V4',
-    slug: 'clavier-mecanique-razer-blackwidow-v4',
-    price: 349.0,
-    compareAtPrice: 399.0,
-    category: 'Peripheriques',
-    brand: 'Razer',
-    stock: 0,
-    status: 'out_of_stock',
-    images: ['https://via.placeholder.com/300x300?text=Razer+Keyboard'],
-    createdAt: '2026-02-01T16:00:00Z',
-    updatedAt: '2026-02-12T09:30:00Z',
-  },
-];
+/**
+ * Genere un slug a partir d'un nom.
+ */
+function generateSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+}
 
 /**
  * GET /api/admin/products
  * Liste tous les produits avec pagination et filtres.
  */
-router.get('/', (req: Request, res: Response) => {
-  const { page = '1', limit = '20', search, category, status } = req.query;
+router.get('/', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const { search, category, status } = req.query;
 
-  // TODO: Requeter Firestore avec pagination et filtres
-  let filtered = [...mockProducts];
+    let query: FirebaseFirestore.Query = productsCol;
 
-  if (search) {
-    const q = (search as string).toLowerCase();
-    filtered = filtered.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.brand.toLowerCase().includes(q)
-    );
+    if (category) {
+      query = query.where('category', '==', category);
+    }
+
+    if (status) {
+      query = query.where('status', '==', status);
+    }
+
+    query = query.orderBy('createdAt', 'desc');
+
+    // Get total count for pagination
+    const countSnapshot = await query.get();
+    let allDocs = countSnapshot.docs;
+
+    // Client-side search filter (Firestore doesn't support native contains)
+    if (search) {
+      const q = (search as string).toLowerCase();
+      allDocs = allDocs.filter((doc) => {
+        const data = doc.data();
+        return (
+          (data.name && data.name.toLowerCase().includes(q)) ||
+          (data.brand && data.brand.toLowerCase().includes(q)) ||
+          (data.sku && data.sku.toLowerCase().includes(q))
+        );
+      });
+    }
+
+    const total = allDocs.length;
+    const totalPages = Math.ceil(total / limit);
+    const offset = (page - 1) * limit;
+
+    const paginatedDocs = allDocs.slice(offset, offset + limit);
+
+    const products = paginatedDocs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    res.json({
+      success: true,
+      data: products,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+      },
+    });
+  } catch (error) {
+    console.error('[Products] Erreur lors de la recuperation des produits:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la recuperation des produits',
+    });
   }
-
-  if (category) {
-    filtered = filtered.filter((p) => p.category === category);
-  }
-
-  if (status) {
-    filtered = filtered.filter((p) => p.status === status);
-  }
-
-  res.json({
-    success: true,
-    data: filtered,
-    pagination: {
-      page: parseInt(page as string),
-      limit: parseInt(limit as string),
-      total: filtered.length,
-      totalPages: Math.ceil(filtered.length / parseInt(limit as string)),
-    },
-  });
 });
 
 /**
  * POST /api/admin/products
  * Cree un nouveau produit.
  */
-router.post('/', (req: Request, res: Response) => {
-  // TODO: Valider les donnees avec Zod et sauvegarder dans Firestore
-  const productData = req.body;
+router.post('/', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { name, price, category, brand, description, stock, status, images, compareAtPrice, sku, tags } = req.body;
 
-  const newProduct = {
-    id: `prod_${Date.now()}`,
-    ...productData,
-    status: productData.status || 'draft',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
+    // Validation des champs requis
+    if (!name || name.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        message: 'Le nom du produit est requis',
+      });
+    }
 
-  console.log('[Products] Nouveau produit cree (mock):', newProduct.id);
+    if (price === undefined || price === null || isNaN(Number(price)) || Number(price) < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Le prix du produit est requis et doit etre un nombre positif',
+      });
+    }
 
-  res.status(201).json({
-    success: true,
-    message: 'Produit cree avec succes',
-    data: newProduct,
-  });
+    if (!category || category.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        message: 'La categorie du produit est requise',
+      });
+    }
+
+    const slug = generateSlug(name);
+    const now = new Date().toISOString();
+
+    const productData = {
+      name: name.trim(),
+      slug,
+      price: Number(price),
+      compareAtPrice: compareAtPrice ? Number(compareAtPrice) : null,
+      category,
+      brand: brand || null,
+      description: description || '',
+      stock: stock !== undefined ? Number(stock) : 0,
+      status: status || 'draft',
+      images: images || [],
+      sku: sku || null,
+      tags: tags || [],
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const docRef = await productsCol.add(productData);
+
+    // Log audit
+    await auditCol.add({
+      action: 'create',
+      resource: 'products',
+      resourceId: docRef.id,
+      details: `Produit cree: ${name}`,
+      adminId: req.user?.uid || 'unknown',
+      adminEmail: req.user?.email || 'unknown',
+      timestamp: now,
+    });
+
+    console.log('[Products] Nouveau produit cree:', docRef.id);
+
+    res.status(201).json({
+      success: true,
+      message: 'Produit cree avec succes',
+      data: { id: docRef.id, ...productData },
+    });
+  } catch (error) {
+    console.error('[Products] Erreur lors de la creation du produit:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la creation du produit',
+    });
+  }
 });
 
 /**
  * GET /api/admin/products/:id
  * Recupere un produit par son ID.
  */
-router.get('/:id', (req: Request, res: Response) => {
-  const { id } = req.params;
+router.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const doc = await productsCol.doc(id).get();
 
-  // TODO: Requeter Firestore par ID
-  const product = mockProducts.find((p) => p.id === id);
+    if (!doc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Produit non trouve',
+      });
+    }
 
-  if (!product) {
-    return res.status(404).json({
+    res.json({
+      success: true,
+      data: { id: doc.id, ...doc.data() },
+    });
+  } catch (error) {
+    console.error('[Products] Erreur lors de la recuperation du produit:', error);
+    res.status(500).json({
       success: false,
-      message: 'Produit non trouve',
+      message: 'Erreur lors de la recuperation du produit',
     });
   }
-
-  res.json({
-    success: true,
-    data: product,
-  });
 });
 
 /**
  * PUT /api/admin/products/:id
  * Met a jour un produit existant.
  */
-router.put('/:id', (req: Request, res: Response) => {
-  const { id } = req.params;
-  const updateData = req.body;
+router.put('/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const docRef = productsCol.doc(id);
+    const doc = await docRef.get();
 
-  // TODO: Valider avec Zod et mettre a jour dans Firestore
-  const existingProduct = mockProducts.find((p) => p.id === id);
+    if (!doc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Produit non trouve',
+      });
+    }
 
-  if (!existingProduct) {
-    return res.status(404).json({
+    const updateData = { ...req.body };
+    // Empeche la modification de l'ID et des timestamps de creation
+    delete updateData.id;
+    delete updateData.createdAt;
+
+    updateData.updatedAt = new Date().toISOString();
+
+    // Regenerer le slug si le nom change
+    if (updateData.name) {
+      updateData.slug = generateSlug(updateData.name);
+    }
+
+    await docRef.update(updateData);
+
+    const updatedDoc = await docRef.get();
+
+    // Log audit
+    await auditCol.add({
+      action: 'update',
+      resource: 'products',
+      resourceId: id,
+      details: `Produit mis a jour: ${updatedDoc.data()?.name || id}`,
+      adminId: req.user?.uid || 'unknown',
+      adminEmail: req.user?.email || 'unknown',
+      timestamp: updateData.updatedAt,
+    });
+
+    console.log('[Products] Produit mis a jour:', id);
+
+    res.json({
+      success: true,
+      message: 'Produit mis a jour avec succes',
+      data: { id: updatedDoc.id, ...updatedDoc.data() },
+    });
+  } catch (error) {
+    console.error('[Products] Erreur lors de la mise a jour du produit:', error);
+    res.status(500).json({
       success: false,
-      message: 'Produit non trouve',
+      message: 'Erreur lors de la mise a jour du produit',
     });
   }
-
-  const updatedProduct = {
-    ...existingProduct,
-    ...updateData,
-    id, // Empeche la modification de l'ID
-    updatedAt: new Date().toISOString(),
-  };
-
-  console.log('[Products] Produit mis a jour (mock):', id);
-
-  res.json({
-    success: true,
-    message: 'Produit mis a jour avec succes',
-    data: updatedProduct,
-  });
 });
 
 /**
  * DELETE /api/admin/products/:id
- * Supprime un produit.
+ * Supprime un produit (soft delete par defaut, hard delete avec ?hard=true).
  */
-router.delete('/:id', (req: Request, res: Response) => {
-  const { id } = req.params;
+router.delete('/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const hard = req.query.hard === 'true';
+    const docRef = productsCol.doc(id);
+    const doc = await docRef.get();
 
-  // TODO: Supprimer de Firestore et nettoyer les images GCS
-  const product = mockProducts.find((p) => p.id === id);
+    if (!doc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Produit non trouve',
+      });
+    }
 
-  if (!product) {
-    return res.status(404).json({
+    const productName = doc.data()?.name || id;
+    const now = new Date().toISOString();
+
+    if (hard) {
+      await docRef.delete();
+    } else {
+      await docRef.update({
+        isActive: false,
+        status: 'archived',
+        updatedAt: now,
+      });
+    }
+
+    // Log audit
+    await auditCol.add({
+      action: hard ? 'hard_delete' : 'soft_delete',
+      resource: 'products',
+      resourceId: id,
+      details: `Produit ${hard ? 'supprime definitivement' : 'desactive'}: ${productName}`,
+      adminId: req.user?.uid || 'unknown',
+      adminEmail: req.user?.email || 'unknown',
+      timestamp: now,
+    });
+
+    console.log(`[Products] Produit ${hard ? 'supprime' : 'desactive'}:`, id);
+
+    res.json({
+      success: true,
+      message: hard ? 'Produit supprime definitivement' : 'Produit desactive avec succes',
+    });
+  } catch (error) {
+    console.error('[Products] Erreur lors de la suppression du produit:', error);
+    res.status(500).json({
       success: false,
-      message: 'Produit non trouve',
+      message: 'Erreur lors de la suppression du produit',
     });
   }
-
-  console.log('[Products] Produit supprime (mock):', id);
-
-  res.json({
-    success: true,
-    message: 'Produit supprime avec succes',
-  });
 });
 
 /**
  * POST /api/admin/products/:id/images
- * Upload d'images pour un produit.
+ * Upload d'images pour un produit vers GCS.
  */
-router.post('/:id/images', upload.array('images', 10), (req: Request, res: Response) => {
-  const { id } = req.params;
-  const files = req.files as Express.Multer.File[];
+router.post('/:id/images', upload.array('images', 10), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const files = req.files as Express.Multer.File[];
 
-  if (!files || files.length === 0) {
-    return res.status(400).json({
+    if (!files || files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Aucun fichier envoye',
+      });
+    }
+
+    const docRef = productsCol.doc(id);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Produit non trouve',
+      });
+    }
+
+    const uploadedUrls: string[] = [];
+
+    for (const file of files) {
+      const ext = file.originalname.split('.').pop() || 'jpg';
+      const fileName = `products/${id}/${uuidv4()}.${ext}`;
+      const blob = bucket.file(fileName);
+
+      await blob.save(file.buffer, {
+        metadata: {
+          contentType: file.mimetype,
+        },
+        resumable: false,
+      });
+
+      // Rendre le fichier public
+      await blob.makePublic();
+
+      uploadedUrls.push(getPublicUrl(fileName));
+    }
+
+    // Mettre a jour le tableau images du produit
+    const existingImages: string[] = doc.data()?.images || [];
+    const allImages = [...existingImages, ...uploadedUrls];
+    const now = new Date().toISOString();
+
+    await docRef.update({
+      images: allImages,
+      updatedAt: now,
+    });
+
+    // Log audit
+    await auditCol.add({
+      action: 'upload_images',
+      resource: 'products',
+      resourceId: id,
+      details: `${files.length} image(s) uploadee(s) pour le produit ${doc.data()?.name || id}`,
+      adminId: req.user?.uid || 'unknown',
+      adminEmail: req.user?.email || 'unknown',
+      timestamp: now,
+    });
+
+    console.log(`[Products] ${files.length} image(s) uploadee(s) pour le produit ${id}`);
+
+    res.json({
+      success: true,
+      message: `${files.length} image(s) uploadee(s) avec succes`,
+      data: {
+        productId: id,
+        urls: uploadedUrls,
+        allImages,
+      },
+    });
+  } catch (error) {
+    console.error('[Products] Erreur lors de l\'upload des images:', error);
+    res.status(500).json({
       success: false,
-      message: 'Aucun fichier envoye',
+      message: 'Erreur lors de l\'upload des images',
     });
   }
-
-  // TODO: Uploader vers GCS via le module storage et mettre a jour Firestore
-  const uploadedUrls = files.map(
-    (file, index) =>
-      `https://storage.googleapis.com/play-tn-media/products/${id}/${Date.now()}_${index}_${file.originalname}`
-  );
-
-  console.log(`[Products] ${files.length} image(s) uploadee(s) pour le produit ${id} (mock)`);
-
-  res.json({
-    success: true,
-    message: `${files.length} image(s) uploadee(s) avec succes`,
-    data: {
-      productId: id,
-      urls: uploadedUrls,
-    },
-  });
 });
 
 export default router;

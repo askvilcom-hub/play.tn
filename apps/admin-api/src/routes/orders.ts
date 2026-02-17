@@ -1,4 +1,6 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
+import { db } from '../config/firebase';
+import { AuthenticatedRequest } from '../middleware/auth';
 
 /**
  * Routes pour la gestion des commandes cote admin.
@@ -7,115 +9,12 @@ import { Router, Request, Response } from 'express';
 
 const router = Router();
 
-// --- Donnees mock pour le scaffold ---
-const mockOrders = [
-  {
-    id: 'ORD-1042',
-    customer: {
-      id: 'cust_001',
-      name: 'Ahmed Ben Ali',
-      email: 'ahmed.benali@email.com',
-      phone: '+216 50 123 456',
-    },
-    items: [
-      {
-        productId: 'prod_001',
-        name: 'Manette PS5 DualSense',
-        quantity: 2,
-        price: 189.9,
-        total: 379.8,
-      },
-    ],
-    subtotal: 379.8,
-    shippingCost: 7.0,
-    total: 386.8,
-    status: 'confirmed',
-    paymentMethod: 'card',
-    paymentStatus: 'paid',
-    shippingAddress: {
-      street: '15 Rue de la Liberte',
-      city: 'Tunis',
-      governorate: 'Tunis',
-      postalCode: '1000',
-    },
-    createdAt: '2026-02-16T14:30:00Z',
-    updatedAt: '2026-02-16T15:00:00Z',
-  },
-  {
-    id: 'ORD-1041',
-    customer: {
-      id: 'cust_002',
-      name: 'Fatma Trabelsi',
-      email: 'fatma.trabelsi@email.com',
-      phone: '+216 55 987 654',
-    },
-    items: [
-      {
-        productId: 'prod_002',
-        name: 'Casque Gaming HyperX Cloud III',
-        quantity: 1,
-        price: 259.0,
-        total: 259.0,
-      },
-      {
-        productId: 'prod_003',
-        name: 'Clavier Mecanique Razer BlackWidow V4',
-        quantity: 1,
-        price: 349.0,
-        total: 349.0,
-      },
-    ],
-    subtotal: 608.0,
-    shippingCost: 0,
-    total: 608.0,
-    status: 'shipped',
-    paymentMethod: 'cod',
-    paymentStatus: 'pending',
-    shippingAddress: {
-      street: '42 Avenue Habib Bourguiba',
-      city: 'Sfax',
-      governorate: 'Sfax',
-      postalCode: '3000',
-    },
-    createdAt: '2026-02-15T09:20:00Z',
-    updatedAt: '2026-02-16T08:45:00Z',
-  },
-  {
-    id: 'ORD-1040',
-    customer: {
-      id: 'cust_003',
-      name: 'Youssef Khelifi',
-      email: 'youssef.khelifi@email.com',
-      phone: '+216 98 456 789',
-    },
-    items: [
-      {
-        productId: 'prod_001',
-        name: 'Manette PS5 DualSense',
-        quantity: 1,
-        price: 189.9,
-        total: 189.9,
-      },
-    ],
-    subtotal: 189.9,
-    shippingCost: 7.0,
-    total: 196.9,
-    status: 'delivered',
-    paymentMethod: 'card',
-    paymentStatus: 'paid',
-    shippingAddress: {
-      street: '8 Rue Ibn Khaldoun',
-      city: 'Sousse',
-      governorate: 'Sousse',
-      postalCode: '4000',
-    },
-    createdAt: '2026-02-10T11:00:00Z',
-    updatedAt: '2026-02-14T16:30:00Z',
-  },
-];
+const ordersCol = db.collection('orders');
+const usersCol = db.collection('users');
+const auditCol = db.collection('audit_logs');
 
 /**
- * Statuts valides pour une commande
+ * Statuts valides pour une commande et transitions autorisees.
  */
 const VALID_STATUSES = [
   'pending',
@@ -127,114 +26,227 @@ const VALID_STATUSES = [
   'refunded',
 ];
 
+const ALLOWED_TRANSITIONS: Record<string, string[]> = {
+  pending: ['confirmed', 'cancelled'],
+  confirmed: ['processing', 'cancelled'],
+  processing: ['shipped', 'cancelled'],
+  shipped: ['delivered', 'cancelled'],
+  delivered: ['refunded'],
+  cancelled: [],
+  refunded: [],
+};
+
 /**
  * GET /api/admin/orders
  * Liste toutes les commandes avec pagination et filtres.
  */
-router.get('/', (req: Request, res: Response) => {
-  const { page = '1', limit = '20', status, search } = req.query;
+router.get('/', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const { status, search, startDate, endDate } = req.query;
 
-  // TODO: Requeter Firestore avec pagination, tri par date decroissante
-  let filtered = [...mockOrders];
+    let query: FirebaseFirestore.Query = ordersCol;
 
-  if (status) {
-    filtered = filtered.filter((o) => o.status === status);
+    if (status) {
+      query = query.where('status', '==', status);
+    }
+
+    if (startDate) {
+      query = query.where('createdAt', '>=', startDate as string);
+    }
+
+    if (endDate) {
+      query = query.where('createdAt', '<=', endDate as string);
+    }
+
+    query = query.orderBy('createdAt', 'desc');
+
+    const snapshot = await query.get();
+    let allDocs = snapshot.docs;
+
+    // Client-side search filter
+    if (search) {
+      const q = (search as string).toLowerCase();
+      allDocs = allDocs.filter((doc) => {
+        const data = doc.data();
+        return (
+          (data.orderNumber && data.orderNumber.toLowerCase().includes(q)) ||
+          doc.id.toLowerCase().includes(q) ||
+          (data.customer?.name && data.customer.name.toLowerCase().includes(q)) ||
+          (data.customer?.email && data.customer.email.toLowerCase().includes(q))
+        );
+      });
+    }
+
+    const total = allDocs.length;
+    const totalPages = Math.ceil(total / limit);
+    const offset = (page - 1) * limit;
+
+    const paginatedDocs = allDocs.slice(offset, offset + limit);
+
+    const orders = paginatedDocs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    res.json({
+      success: true,
+      data: orders,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+      },
+    });
+  } catch (error) {
+    console.error('[Orders] Erreur lors de la recuperation des commandes:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la recuperation des commandes',
+    });
   }
-
-  if (search) {
-    const q = (search as string).toLowerCase();
-    filtered = filtered.filter(
-      (o) =>
-        o.id.toLowerCase().includes(q) ||
-        o.customer.name.toLowerCase().includes(q) ||
-        o.customer.email.toLowerCase().includes(q)
-    );
-  }
-
-  res.json({
-    success: true,
-    data: filtered,
-    pagination: {
-      page: parseInt(page as string),
-      limit: parseInt(limit as string),
-      total: filtered.length,
-      totalPages: Math.ceil(filtered.length / parseInt(limit as string)),
-    },
-  });
 });
 
 /**
  * GET /api/admin/orders/:id
- * Recupere le detail d'une commande.
+ * Recupere le detail d'une commande avec les informations du client.
  */
-router.get('/:id', (req: Request, res: Response) => {
-  const { id } = req.params;
+router.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const doc = await ordersCol.doc(id).get();
 
-  // TODO: Requeter Firestore par ID
-  const order = mockOrders.find((o) => o.id === id);
+    if (!doc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Commande non trouvee',
+      });
+    }
 
-  if (!order) {
-    return res.status(404).json({
+    const orderData = doc.data()!;
+
+    // Lookup customer info if customerId is present
+    let customerDetail = orderData.customer || null;
+    if (orderData.customerId) {
+      const customerDoc = await usersCol.doc(orderData.customerId).get();
+      if (customerDoc.exists) {
+        customerDetail = {
+          id: customerDoc.id,
+          ...customerDoc.data(),
+          // Ne pas exposer de donnees sensibles
+          password: undefined,
+        };
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        id: doc.id,
+        ...orderData,
+        customer: customerDetail,
+      },
+    });
+  } catch (error) {
+    console.error('[Orders] Erreur lors de la recuperation de la commande:', error);
+    res.status(500).json({
       success: false,
-      message: 'Commande non trouvee',
+      message: 'Erreur lors de la recuperation de la commande',
     });
   }
-
-  res.json({
-    success: true,
-    data: order,
-  });
 });
 
 /**
  * PATCH /api/admin/orders/:id/status
- * Met a jour le statut d'une commande.
+ * Met a jour le statut d'une commande avec validation des transitions autorisees.
  */
-router.patch('/:id/status', (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { status, note } = req.body;
+router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status, note } = req.body;
 
-  if (!status || !VALID_STATUSES.includes(status)) {
-    return res.status(400).json({
-      success: false,
-      message: `Statut invalide. Statuts valides: ${VALID_STATUSES.join(', ')}`,
-    });
-  }
+    if (!status || !VALID_STATUSES.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Statut invalide. Statuts valides: ${VALID_STATUSES.join(', ')}`,
+      });
+    }
 
-  // TODO: Mettre a jour dans Firestore, ajouter au historique de statuts,
-  // envoyer notification email au client
-  const order = mockOrders.find((o) => o.id === id);
+    const docRef = ordersCol.doc(id);
+    const doc = await docRef.get();
 
-  if (!order) {
-    return res.status(404).json({
-      success: false,
-      message: 'Commande non trouvee',
-    });
-  }
+    if (!doc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Commande non trouvee',
+      });
+    }
 
-  const previousStatus = order.status;
+    const orderData = doc.data()!;
+    const previousStatus = orderData.status;
 
-  console.log(
-    `[Orders] Commande ${id}: ${previousStatus} -> ${status}${note ? ` (note: ${note})` : ''}`
-  );
+    // Valider la transition de statut
+    const allowedNext = ALLOWED_TRANSITIONS[previousStatus] || [];
+    if (!allowedNext.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Transition de statut non autorisee: ${previousStatus} -> ${status}. Transitions possibles: ${allowedNext.join(', ') || 'aucune'}`,
+      });
+    }
 
-  res.json({
-    success: true,
-    message: `Statut de la commande mis a jour: ${previousStatus} -> ${status}`,
-    data: {
-      ...order,
+    const now = new Date().toISOString();
+
+    // Construire l'entree d'historique
+    const statusHistoryEntry = {
+      from: previousStatus,
+      to: status,
+      note: note || null,
+      changedBy: req.user?.email || 'unknown',
+      changedAt: now,
+    };
+
+    const existingHistory = orderData.statusHistory || [];
+
+    await docRef.update({
       status,
-      updatedAt: new Date().toISOString(),
-      statusHistory: [
-        {
-          from: previousStatus,
-          to: status,
-          note: note || null,
-          changedAt: new Date().toISOString(),
-        },
-      ],
-    },
-  });
+      updatedAt: now,
+      statusHistory: [...existingHistory, statusHistoryEntry],
+    });
+
+    // Log audit
+    await auditCol.add({
+      action: 'update_status',
+      resource: 'orders',
+      resourceId: id,
+      details: `Commande ${id}: ${previousStatus} -> ${status}${note ? ` (note: ${note})` : ''}`,
+      adminId: req.user?.uid || 'unknown',
+      adminEmail: req.user?.email || 'unknown',
+      timestamp: now,
+    });
+
+    const updatedDoc = await docRef.get();
+
+    console.log(
+      `[Orders] Commande ${id}: ${previousStatus} -> ${status}${note ? ` (note: ${note})` : ''}`
+    );
+
+    res.json({
+      success: true,
+      message: `Statut de la commande mis a jour: ${previousStatus} -> ${status}`,
+      data: {
+        id: updatedDoc.id,
+        ...updatedDoc.data(),
+      },
+    });
+  } catch (error) {
+    console.error('[Orders] Erreur lors de la mise a jour du statut:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la mise a jour du statut de la commande',
+    });
+  }
 });
 
 export default router;

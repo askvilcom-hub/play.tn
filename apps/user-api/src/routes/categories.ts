@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { asyncHandler } from '../middleware/errorHandler';
+import { db, COLLECTIONS } from '../config/firebase';
+import { asyncHandler, AppError } from '../middleware/errorHandler';
 import { validateParams, validateQuery } from '../middleware/validate';
 
 const router = Router();
@@ -23,83 +24,94 @@ const categoryProductsQuerySchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/categories — List all categories
+// Helper: determine sort field and direction
+// ---------------------------------------------------------------------------
+function getSortConfig(sort: string): { field: string; direction: 'asc' | 'desc' } {
+  switch (sort) {
+    case 'price_asc':
+      return { field: 'price', direction: 'asc' };
+    case 'price_desc':
+      return { field: 'price', direction: 'desc' };
+    case 'popular':
+      return { field: 'reviewCount', direction: 'desc' };
+    case 'rating':
+      return { field: 'averageRating', direction: 'desc' };
+    case 'newest':
+    default:
+      return { field: 'createdAt', direction: 'desc' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: build a tree structure from flat categories
+// ---------------------------------------------------------------------------
+interface CategoryNode {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  image?: string;
+  productCount: number;
+  order: number;
+  parentId: string | null;
+  children: CategoryNode[];
+}
+
+function buildCategoryTree(categories: CategoryNode[]): CategoryNode[] {
+  const map = new Map<string, CategoryNode>();
+  const roots: CategoryNode[] = [];
+
+  // Index all categories by id
+  for (const cat of categories) {
+    cat.children = [];
+    map.set(cat.id, cat);
+  }
+
+  // Build the tree
+  for (const cat of categories) {
+    if (cat.parentId && map.has(cat.parentId)) {
+      map.get(cat.parentId)!.children.push(cat);
+    } else {
+      roots.push(cat);
+    }
+  }
+
+  return roots;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/categories — List all categories (tree structure)
 // ---------------------------------------------------------------------------
 router.get(
   '/',
   asyncHandler(async (_req: Request, res: Response): Promise<void> => {
-    // TODO: Replace with real Firestore query
-    // const snapshot = await db
-    //   .collection(COLLECTIONS.CATEGORIES)
-    //   .where('isActive', '==', true)
-    //   .orderBy('order', 'asc')
-    //   .get();
-    //
-    // const categories = snapshot.docs.map(doc => ({
-    //   id: doc.id,
-    //   ...doc.data(),
-    // }));
+    const snapshot = await db
+      .collection(COLLECTIONS.CATEGORIES)
+      .where('isActive', '==', true)
+      .orderBy('order', 'asc')
+      .get();
 
-    const mockCategories = [
-      {
-        id: 'cat_001',
-        name: 'Jeux PS5',
-        slug: 'jeux-ps5',
-        description: 'Les derniers jeux pour PlayStation 5.',
-        image: 'https://placeholder.co/600x400',
-        productCount: 45,
-        order: 1,
-      },
-      {
-        id: 'cat_002',
-        name: 'Jeux PS4',
-        slug: 'jeux-ps4',
-        description: 'Catalogue de jeux PlayStation 4.',
-        image: 'https://placeholder.co/600x400',
-        productCount: 120,
-        order: 2,
-      },
-      {
-        id: 'cat_003',
-        name: 'Jeux Xbox',
-        slug: 'jeux-xbox',
-        description: 'Jeux pour Xbox Series X|S et Xbox One.',
-        image: 'https://placeholder.co/600x400',
-        productCount: 38,
-        order: 3,
-      },
-      {
-        id: 'cat_004',
-        name: 'Jeux Nintendo Switch',
-        slug: 'jeux-nintendo-switch',
-        description: 'Jeux pour Nintendo Switch.',
-        image: 'https://placeholder.co/600x400',
-        productCount: 55,
-        order: 4,
-      },
-      {
-        id: 'cat_005',
-        name: 'Accessoires',
-        slug: 'accessoires',
-        description: 'Manettes, casques, câbles et autres accessoires gaming.',
-        image: 'https://placeholder.co/600x400',
-        productCount: 30,
-        order: 5,
-      },
-      {
-        id: 'cat_006',
-        name: 'Consoles',
-        slug: 'consoles',
-        description: 'Consoles de jeux neuves et reconditionnées.',
-        image: 'https://placeholder.co/600x400',
-        productCount: 12,
-        order: 6,
-      },
-    ];
+    const categories: CategoryNode[] = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        name: data.name,
+        slug: data.slug,
+        description: data.description || undefined,
+        image: data.image || undefined,
+        productCount: data.productCount || 0,
+        order: data.order || 0,
+        parentId: data.parentId || null,
+        children: [],
+      };
+    });
+
+    // Build tree structure (if categories have parentId relationships)
+    const tree = buildCategoryTree(categories);
 
     res.json({
       success: true,
-      data: mockCategories,
+      data: tree,
     });
   })
 );
@@ -116,75 +128,93 @@ router.get(
     const { page, limit, sort } =
       req.query as unknown as z.infer<typeof categoryProductsQuerySchema>;
 
-    // TODO: Replace with real Firestore query
-    // 1. Get the category document
-    // const categorySnapshot = await db
-    //   .collection(COLLECTIONS.CATEGORIES)
-    //   .where('slug', '==', slug)
-    //   .where('isActive', '==', true)
-    //   .limit(1)
-    //   .get();
-    //
-    // if (categorySnapshot.empty) throw new AppError('Catégorie introuvable.', 404);
-    // const category = { id: categorySnapshot.docs[0].id, ...categorySnapshot.docs[0].data() };
-    //
-    // 2. Get products in this category
-    // const productsSnapshot = await db
-    //   .collection(COLLECTIONS.PRODUCTS)
-    //   .where('categorySlug', '==', slug)
-    //   .where('status', '==', 'active')
-    //   .orderBy(sortField, sortDirection)
-    //   .limit(limit)
-    //   .get();
+    const pageNum = page ?? 1;
+    const limitNum = limit ?? 20;
+    const { field: sortField, direction: sortDirection } = getSortConfig(sort ?? 'newest');
 
-    const mockCategory = {
-      id: 'cat_001',
-      name: 'Jeux PS5',
-      slug,
-      description: 'Les derniers jeux pour PlayStation 5.',
-      image: 'https://placeholder.co/600x400',
-      productCount: 45,
+    // 1. Get the category document
+    const categorySnapshot = await db
+      .collection(COLLECTIONS.CATEGORIES)
+      .where('slug', '==', slug)
+      .where('isActive', '==', true)
+      .limit(1)
+      .get();
+
+    if (categorySnapshot.empty) {
+      throw new AppError('Categorie introuvable.', 404);
+    }
+
+    const categoryDoc = categorySnapshot.docs[0];
+    const categoryData = categoryDoc.data();
+
+    const category = {
+      id: categoryDoc.id,
+      name: categoryData.name,
+      slug: categoryData.slug,
+      description: categoryData.description || '',
+      image: categoryData.image || null,
+      productCount: categoryData.productCount || 0,
     };
 
-    const mockProducts = [
-      {
-        id: 'prod_002',
-        name: 'FIFA 25 - PS5',
-        slug: 'fifa-25-ps5',
-        price: 149.0,
-        currency: 'TND',
-        brand: 'EA Sports',
-        image: 'https://placeholder.co/400x400',
-        rating: 4.2,
-        reviewCount: 18,
-        inStock: true,
-      },
-      {
-        id: 'prod_004',
-        name: 'God of War Ragnarök - PS5',
-        slug: 'god-of-war-ragnarok-ps5',
-        price: 129.0,
-        currency: 'TND',
-        brand: 'Sony',
-        image: 'https://placeholder.co/400x400',
-        rating: 4.9,
-        reviewCount: 64,
-        inStock: true,
-      },
-    ];
+    // 2. Get products in this category
+    let productsQuery: FirebaseFirestore.Query = db
+      .collection(COLLECTIONS.PRODUCTS)
+      .where('categorySlug', '==', slug)
+      .where('status', '==', 'active');
+
+    // Count total products in category
+    const countSnapshot = await productsQuery.count().get();
+    const total = countSnapshot.data().count;
+
+    // Apply sorting
+    productsQuery = productsQuery.orderBy(sortField, sortDirection);
+
+    // Cursor-based pagination
+    if (pageNum > 1) {
+      const skipCount = (pageNum - 1) * limitNum;
+      const cursorSnapshot = await productsQuery.limit(skipCount).get();
+      if (!cursorSnapshot.empty) {
+        const lastDoc = cursorSnapshot.docs[cursorSnapshot.docs.length - 1];
+        productsQuery = productsQuery.startAfter(lastDoc);
+      }
+    }
+
+    productsQuery = productsQuery.limit(limitNum);
+
+    const productsSnapshot = await productsQuery.get();
+
+    const products = productsSnapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        name: data.name,
+        slug: data.slug,
+        price: data.price,
+        compareAtPrice: data.compareAtPrice || null,
+        currency: data.currency || 'TND',
+        brand: data.brand,
+        image: data.images?.[0] || null,
+        images: data.images || [],
+        rating: data.averageRating || 0,
+        reviewCount: data.reviewCount || 0,
+        inStock: (data.stock ?? 0) > 0,
+      };
+    });
+
+    const totalPages = Math.ceil(total / limitNum);
 
     res.json({
       success: true,
       data: {
-        category: mockCategory,
-        products: mockProducts,
+        category,
+        products,
         pagination: {
-          page: page ?? 1,
-          limit: limit ?? 20,
-          total: 45,
-          totalPages: 3,
-          hasNext: true,
-          hasPrev: false,
+          page: pageNum,
+          limit: limitNum,
+          total,
+          totalPages,
+          hasNext: pageNum < totalPages,
+          hasPrev: pageNum > 1,
         },
         sort,
       },
